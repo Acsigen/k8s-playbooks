@@ -1,0 +1,217 @@
+---
+- name: "Deploy master node"
+  hosts: k8s-node1
+  gather_facts: true
+  tasks:
+    - name: Create containerd config directory
+      become: true
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Generate default containerd config
+      ansible.builtin.command:
+        cmd: containerd config default
+      register: containerd_config_output
+      changed_when: false
+
+    - name: Write containerd config file
+      become: true
+      ansible.builtin.copy:
+        content: "{{ containerd_config_output.stdout }}"
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+      notify: Restart containerd
+
+    - name: Enable systemd cgroup driver in containerd config
+      become: true
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        line: '  SystemdCgroup = true'
+        state: present
+      notify: Restart containerd
+
+    - name: Load overlay kernel module
+      become: true
+      community.general.modprobe:
+        name: overlay
+        state: present
+
+    - name: Load br_netfilter kernel module
+      become: true
+      community.general.modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Persist kernel modules configuration
+      become: true
+      ansible.builtin.copy:
+        content: |
+          overlay
+          br_netfilter
+        dest: /etc/modules-load.d/k8s.conf
+        mode: '0644'
+
+    - name: Set bridge-nf-call-iptables
+      become: true
+      ansible.builtin.sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: '1'
+        sysctl_set: true
+        state: present
+
+    - name: Set bridge-nf-call-ip6tables
+      become: true
+      ansible.builtin.sysctl:
+        name: net.bridge.bridge-nf-call-ip6tables
+        value: '1'
+        sysctl_set: true
+        state: present
+
+    - name: Set ip_forward
+      become: true
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+
+    - name: Install kubeadm dependencies
+      become: true
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Create directory for APT keyrings
+      become: true
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Kubernetes APT repository GPG key
+      become: true
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key"
+        dest: /tmp/kubernetes-release.key
+        mode: '0644'
+
+    - name: Dearmor and install Kubernetes GPG key
+      become: true
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-release.key
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Create Kubernetes APT repository list file
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/ /"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update APT cache
+      become: true
+      ansible.builtin.apt:
+        update_cache: true
+    - name: Install Kubernetes components and prevent automatic updates
+      become: true
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+          - containerd
+        state: present
+        update_cache: true
+      register: k8s_install
+    - name: Hold Kubernetes packages at current version
+      become: true
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Create kubeadm config directory
+      become: true
+      ansible.builtin.file:
+        path: /etc/kubeadm
+        state: directory
+        mode: '0755'
+
+    - name: Write kubeadm configuration
+      become: true
+      ansible.builtin.copy:
+        content: |
+          kind: ClusterConfiguration
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kubernetesVersion: {{ k8s_version }}.{{ k8s_patch_version }}
+          networking:
+            podSubnet: {{ k8s_pod_network_cidr }}
+          ---
+          kind: KubeletConfiguration
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          cgroupDriver: systemd
+        dest: /etc/kubeadm/config.yaml
+        mode: '0644'
+
+    - name: Init the cluster
+      become: true
+      ansible.builtin.command:
+        cmd: "kubeadm init --config=/etc/kubeadm/config.yaml"
+      register: kubeadm_init
+      changed_when: "'Your Kubernetes control-plane has initialized successfully!' in kubeadm_init.stderr"
+
+    - name: Save kubeadm init output locally
+      ansible.builtin.copy:
+        content: "{{ kubeadm_init.stdout }}\n{{ kubeadm_init.stderr }}"
+        dest: "{{ playbook_dir }}/../kubeadm_init_output.log"
+        mode: '0600'
+      delegate_to: localhost
+
+    - name: Create the .kube dir in home
+      ansible.builtin.file:
+        path: "/home/daniel/.kube"
+        state: directory
+        mode: "0755"
+
+    - name: Copy the admin conf to .kube
+      become: true
+      ansible.builtin.copy:
+        remote_src: true
+        src: /etc/kubernetes/admin.conf
+        dest: /home/daniel/.kube/config
+        mode: "0644"
+        owner: 1000
+        group: 1000
+      notify: Install Calico
+  handlers:
+    - name: Restart containerd
+      become: true
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: true
+
+    - name: Save kubeadm join command
+      become: true
+      ansible.builtin.copy:
+        content: "{{ kubeadm_init.stderr }}"
+        dest: ./kubeadm_init_output.log
+        mode: '0600'
+
+    - name: Install Calico
+      ansible.builtin.command:
+        cmd: "kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/{{ k8s_calico_version }}/manifests/calico.yaml"
+      changed_when: false

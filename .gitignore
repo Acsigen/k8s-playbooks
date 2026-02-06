@@ -1,0 +1,4 @@
+*.log
+ansible.cfg
+vault-password.txt
+.vscode/settings.json

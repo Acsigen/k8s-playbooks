@@ -1,0 +1,8 @@
+---
+- name: "Test connection"
+  hosts: k8s-servers
+  gather_facts: false
+  tasks:
+    - name: Test connection with ping
+      ansible.builtin.ping:
+        data: pong
