@@ -1,37 +1,8 @@
 ---
-- name: "Deploy master node"
-  hosts: k8s-node1
+- name: "Deploy k8s on nodes"
+  hosts: k8s-servers
   gather_facts: true
   tasks:
-    - name: Create containerd config directory
-      become: true
-      ansible.builtin.file:
-        path: /etc/containerd
-        state: directory
-        mode: '0755'
-
-    - name: Generate default containerd config
-      ansible.builtin.command:
-        cmd: containerd config default
-      register: containerd_config_output
-      changed_when: false
-
-    - name: Write containerd config file
-      become: true
-      ansible.builtin.copy:
-        content: "{{ containerd_config_output.stdout }}"
-        dest: /etc/containerd/config.toml
-        mode: '0644'
-      notify: Restart containerd
-
-    - name: Enable systemd cgroup driver in containerd config
-      become: true
-      ansible.builtin.lineinfile:
-        path: /etc/containerd/config.toml
-        regexp: 'SystemdCgroup = false'
-        line: '  SystemdCgroup = true'
-        state: present
-      notify: Restart containerd
 
     - name: Load overlay kernel module
       become: true
@@ -143,6 +114,37 @@
         - kubeadm
         - kubectl
 
+    - name: Create containerd config directory
+      become: true
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Generate default containerd config
+      become: true
+      ansible.builtin.command:
+        cmd: containerd config default
+      register: containerd_config_output
+      changed_when: false
+
+    - name: Write containerd config file
+      become: true
+      ansible.builtin.copy:
+        content: "{{ containerd_config_output.stdout }}"
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+      notify: Restart containerd
+
+    - name: Enable systemd cgroup driver in containerd config
+      become: true
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        line: '  SystemdCgroup = true'
+        state: present
+      notify: Restart containerd
+
     - name: Create kubeadm config directory
       become: true
       ansible.builtin.file:
@@ -166,25 +168,31 @@
         dest: /etc/kubeadm/config.yaml
         mode: '0644'
 
-    - name: Init the cluster
-      become: true
-      ansible.builtin.command:
-        cmd: "kubeadm init --config=/etc/kubeadm/config.yaml"
-      register: kubeadm_init
-      changed_when: "'Your Kubernetes control-plane has initialized successfully!' in kubeadm_init.stderr"
+    # - name: Init the cluster
+    #   become: true
+    #   ansible.builtin.command:
+    #     cmd: "kubeadm init --config=/etc/kubeadm/config.yaml"
+    #   register: kubeadm_init
+    #   changed_when: "'Your Kubernetes control-plane has initialized successfully!' in kubeadm_init.stderr"
+    #   when:
+    #     - k8s_cluster_role == "master"
 
-    - name: Save kubeadm init output locally
-      ansible.builtin.copy:
-        content: "{{ kubeadm_init.stdout }}\n{{ kubeadm_init.stderr }}"
-        dest: "{{ playbook_dir }}/../kubeadm_init_output.log"
-        mode: '0600'
-      delegate_to: localhost
+    # - name: Save kubeadm init output locally
+    #   ansible.builtin.copy:
+    #     content: "{{ kubeadm_init.stdout }}\n{{ kubeadm_init.stderr }}"
+    #     dest: "{{ playbook_dir }}/../kubeadm_init_output.log"
+    #     mode: '0600'
+    #   delegate_to: localhost
+    #   when:
+    #     - k8s_cluster_role == "master"
 
     - name: Create the .kube dir in home
       ansible.builtin.file:
         path: "/home/daniel/.kube"
         state: directory
         mode: "0755"
+      when:
+        - k8s_cluster_role == "master"
 
     - name: Copy the admin conf to .kube
       become: true
@@ -195,7 +203,16 @@
         mode: "0644"
         owner: 1000
         group: 1000
-      notify: Install Calico
+      when:
+        - k8s_cluster_role == "master"
+
+    - name: Install Calico
+      ansible.builtin.command:
+        cmd: "kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/{{ k8s_calico_version }}/manifests/calico.yaml"
+      changed_when: false
+      when:
+        - k8s_cluster_role == "master"
+
   handlers:
     - name: Restart containerd
       become: true
@@ -210,8 +227,3 @@
         content: "{{ kubeadm_init.stderr }}"
         dest: ./kubeadm_init_output.log
         mode: '0600'
-
-    - name: Install Calico
-      ansible.builtin.command:
-        cmd: "kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/{{ k8s_calico_version }}/manifests/calico.yaml"
-      changed_when: false
